@@ -15,13 +15,21 @@ Using `Swoole\\Memcached` instead of `swoole_memcached` if `swoole.use_namespace
 The prototypes of most callback variables are `function($err, $result)`. When error occurs, `$err` will be set to a non-empty value that describes error info. You should check the `$err` before you process the `$result` in callback function.
 
 - `__construct(string $host, int $port)`
+
 - `connect(callable $callback)`
+
 - `close()`    close the connection.
+
 - `get(string $key, string $key2, ..., callable $callback)`    `get` method can retrieve multiple values from server, `$result` will be a associative array. Arguments count must be more than 1, and the last argument must be `callback`.
+
 - `set(string $key, string $value, int expire, callable $callback)`    The prototype of `set` is the same as `add` and `replace`. The `$result` of callback is a bool variable which means whether this operation effected the value of `$key`.
+
   - `set`    set the value of key anyway.
+
   - `add`    set the value of key if the key is not exists.
+
   - `replace` set the value of key if the key is exists.
+
 - `delete(string $key, callable $callback)`    `$result` is a bool variable which means whether the deleting operation is successed.
 
 ## Examples
