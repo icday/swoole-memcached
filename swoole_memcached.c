@@ -1305,29 +1305,50 @@ static PHP_METHOD(swoole_memcached, get) {
     zend_size_t key_len;
     zval *cb;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sz", &key, &key_len, &cb) == FAILURE) {
-        RETURN_FALSE;
+    if (ZEND_NUM_ARGS() < 2) {
+        WRONG_PARAM_COUNT;
     }
 
-    if (key_len <= 0) {
-        swoole_php_fatal_error(E_WARNING, "[GET] key name can not be empty.");
+    zend_fcall_info;
+
+    zval ***args = ecalloc(ZEND_NUM_ARGS(), sizeof(zval **));
+    zend_uint argc = ZEND_NUM_ARGS();
+
+    if (zend_get_parameters_array_ex(argc, args) == FAILURE) {
+        efree(args);
         RETURN_FALSE;
     }
 
     zval *object = getThis();
     amc_connection_t *conn = swoole_get_object(object);
     amc_async_context_t *context = &conn->context;
-
     amc_buffer_t *buffer = context->out_buffer;
-    /* Need one more for trailing null byte otherwise \n will be discarded. */
-    size_t need_size = key_len + 7;
-    amc_buffer_make_room(buffer, need_size);
-    int nwrite = snprintf(amc_buffer_tail_ptr(buffer), need_size, "get %s\r\n", key);
-    if (nwrite > 0) {
+
+    amc_buffer_make_room(buffer, 6);
+    memcpy(amc_buffer_tail_ptr(buffer), "get", 3);
+    buffer->len += 3;
+    size_t need_size;
+
+    zend_uint argi = 0;
+    int nwrite = 0;
+    for (; argi < argc - 1; ++argi) {
+        zval *zkey = *(args[argi]);
+        convert_to_string(zkey);
+        if (Z_STRLEN_P(zkey) <= 0) {
+            swoole_php_error(E_WARNING, "key can not be empty.");
+            continue;
+        }
+        need_size = Z_STRLEN_P(zkey) + 2;
+        amc_buffer_make_room(buffer, need_size);
+        nwrite = snprintf(amc_buffer_tail_ptr(buffer), need_size, " %s", Z_STRVAL_P(zkey));
         buffer->len += nwrite;
-    } else {
-        RETURN_FALSE;
     }
+    amc_buffer_make_room(buffer, 2);
+    memcpy(amc_buffer_tail_ptr(buffer), "\r\n", 2);
+    buffer->len += 2;
+    cb = *(args[argi]);
+
+    efree(args);
 
     amc_operation_t *operation = ecalloc(1, sizeof(*operation));
     operation->cb = cb;
