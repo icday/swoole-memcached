@@ -1,6 +1,18 @@
 # swoole-memcached
 
-An async memcached client base on swoole
+An asynchronous PHP memcached client base on swoole
+
+## Installation
+
+```
+git clone git@github.com:icday/swoole-src.git
+cd swoole-src
+# You may need to make swoole-memcached up todate
+# cd swoole-memcached; git pull; cd ..
+phpize
+./configure --enable-async-memcached
+make && make install
+```
 
 ## Classes
 
@@ -31,6 +43,10 @@ The prototypes of most callback variables are `function($err, $result)`. When er
   - `replace` set the value of key if the key is exists.
 
 - `delete(string $key, callable $callback)`    `$result` is a bool variable which means whether the deleting operation is successed.
+
+- `incr(string $key, int $num, callable $callback)`    `$num` should be positive. `result` is the value after operation.
+
+- `decr(string $key, int $num, callable $callback)`    `$num` should be positive. `result` is the value after operation.
 
 ## Examples
 
@@ -71,7 +87,7 @@ $memcached->connect(function() use ($memcached) {
 });
 ```
 
-#### Scope and connection
+#### Scope and disconnect
 
 To close the connection, you can call the `close` method.
 

@@ -423,7 +423,6 @@ static amc_connection_t* amc_connection_create() {
     conn->context.in_buffer = amc_buffer_create();
     conn->context.out_buffer = amc_buffer_create();
 
-    /* TODO connection->context.ev */
     conn->context.ev.data = conn;
     conn->context.ev.addWrite = amc_swoole_event_add_write;
     conn->context.ev.addRead = amc_swoole_event_add_read;
@@ -458,7 +457,8 @@ typedef enum {
     REPLY_NOT_STORED = 0x4,
     REPLY_DELETED = 0x8,
     REPLY_NOT_FOUND = 0x10,
-    REPLY_END = 0x20
+    REPLY_END = 0x20,
+    REPLY_DECIMAL = 0x40
 } amc_reply_type_t;
 
 typedef enum {
@@ -467,6 +467,8 @@ typedef enum {
     OPERATION_ADD,
     OPERATION_REP,
     OPERATION_DEL,
+    OPERATION_INCR,
+    OPERATION_DECR,
 } amc_operation_type_t;
 
 static char *amc_operation_names[] = {
@@ -474,7 +476,9 @@ static char *amc_operation_names[] = {
     "set",
     "add",
     "replace",
-    "delete"
+    "delete",
+    "incr",
+    "decr"
 };
 
 /* relate to amc_operation_type_t */
@@ -483,7 +487,9 @@ static int _AMC_EXPECT_REPLYS[] = {
     REPLY_STORED,
     REPLY_STORED | REPLY_NOT_STORED,
     REPLY_STORED | REPLY_NOT_STORED,
-    REPLY_DELETED | REPLY_NOT_FOUND
+    REPLY_DELETED | REPLY_NOT_FOUND,
+    REPLY_NOT_FOUND | REPLY_DECIMAL,
+    REPLY_NOT_FOUND | REPLY_DECIMAL
 };
 
 #define amc_expect_reply_types_of(r) _AMC_EXPECT_REPLYS[(r)->operation_type]
@@ -497,6 +503,7 @@ typedef enum {
 struct _amc_reply {
     union {
         int effect;
+        int decimal;
         amc_list_t *values;
     } response;
 
@@ -594,6 +601,10 @@ static int amc_on_reply(amc_connection_t *conn, amc_reply_t *reply) {
                     amc_helper_build_zarray_from_list(zparam, reply->response.values);
                 }
                 break;
+            case OPERATION_INCR:
+            case OPERATION_DECR:
+                ZVAL_LONG(zparam, reply->response.decimal);
+                break;
             default:
                 ZVAL_BOOL(zparam, reply->response.effect);
                 break;
@@ -603,7 +614,6 @@ static int amc_on_reply(amc_connection_t *conn, amc_reply_t *reply) {
     if (sw_call_user_function_ex(EG(function_table), NULL, operation->cb, &retval, argc, args, 0, NULL)
         != SUCCESS) {
     }
-    swTrace("after callback reply");
     if (retval) {
         sw_zval_ptr_dtor(&retval);
     }
@@ -670,9 +680,6 @@ static int amc_send_buffer(amc_connection_t *conn) {
     int nwrite = 0;
     while ((nwrite = write(conn->fd, amc_buffer_ptr(buffer), buffer->len)) < 0 && errno == EINTR) {}
 
-    swTrace("write data:%s.", amc_buffer_ptr(buffer));
-    swTrace("the last char:%d %d, and they should be:%d, %d", *(buffer->ptr + 8), *(buffer->ptr + 9), '\r', '\n');
-
     if (nwrite < 0) {
         /* TODO error */
         return AMC_ERR;
@@ -681,7 +688,6 @@ static int amc_send_buffer(amc_connection_t *conn) {
     if (nwrite > 0) {
         amc_buffer_delete_bytes(buffer, nwrite);
     }
-    swTrace("write %d bytes, left %lu bytes in buffer.", nwrite, buffer->len);
 
     return buffer->len == 0 ? AMC_DONE : AMC_OK;
 
@@ -772,8 +778,6 @@ static int amc_parse_value_reply(amc_buffer_t *buffer, amc_reply_t *reply) {
     if (buffer->len <= 0) {
         goto again;
     }
-
-    swTrace("start parse value");
 
     do {
         int roffset = amc_buffer_find_eol(buffer);
@@ -930,7 +934,19 @@ static int amc_parse_reply(amc_buffer_t *buffer, amc_reply_t *reply) {
         goto after_one_line_reply;
     }
 
-    /* TODO more operation (eg. incr/decr) */
+    /* TODO more operation */
+
+    /* incr/decr */
+    if (expect_reply_types & REPLY_DECIMAL) {
+        buf[roffset] = '\0';
+        reply->response.decimal = atoi(buf);
+        swTrace("decimal:%d", reply->response.decimal);
+        if (reply->response.decimal < 0) {
+            reply->err = REPLY_ERR_ERROR;
+            reply->errstr = estrdup("Invalid response");
+        }
+        goto after_one_line_reply;
+    }
 
     if ((expect_reply_types & REPLY_END) && amc_str_equal(buf, "END")) {
         goto after_one_line_reply;
@@ -950,13 +966,11 @@ after_one_line_reply:
 }
 
 static int amc_try_parse_reply(amc_connection_t *conn, amc_reply_t **preply) {
-    swTrace("start try parse");
     amc_async_context_t *context = &conn->context;
     amc_reply_t *reply = context->reply;
 
     if (!reply) {
         if (amc_list_is_empty(context->operation_list)) {
-            swTrace("operation list is empty");
             return AMC_ERR;
         }
 
@@ -971,10 +985,8 @@ static int amc_try_parse_reply(amc_connection_t *conn, amc_reply_t **preply) {
     int res;
     if (context->reply) {
         res = amc_continue_reply(context->in_buffer, reply);
-        swTrace("continue parse reply: %d", res);
     } else {
         res = amc_parse_reply(context->in_buffer, reply);
-        swTrace("parse reply: %d", res);
     }
 
     if (res == AMC_DONE) {
@@ -993,11 +1005,9 @@ static int amc_try_parse_reply(amc_connection_t *conn, amc_reply_t **preply) {
 static void amc_connection_on_read(amc_connection_t *conn) {
     amc_async_context_t *context = &conn->context;
     size_t nread = amc_recv_to_buffer(conn);
-    swTrace("read return:%lu", nread);
     if (nread <= 0) {
         return;
     }
-    swTrace("recv %lu bytes", nread);
 
     amc_reply_t *reply = NULL;
 
@@ -1018,12 +1028,10 @@ static void amc_connection_on_read(amc_connection_t *conn) {
 static void amc_connection_on_connect(amc_connection_t *conn);
 //static void amc_connection_on_read(amc_connection_t *conn);
 static void amc_connection_on_write(amc_connection_t *conn) {
-    swTrace("fd:%d is on write", conn->fd);
     /* TODO get sock err */
     int res = amc_send_buffer(conn);
 
     if (res == AMC_DONE) {
-        swTrace("send done, del write");
         conn->context.ev.delWrite(conn);
     }
 }
@@ -1037,18 +1045,13 @@ static void amc_connection_on_connect(amc_connection_t *conn) {
                                      &retval, 0, NULL, 0, NULL) != SUCCESS) {
             swoole_php_fatal_error(E_WARNING, "Executing on connect callback failure.");
         }
-        swTrace("after on connect");
 
         if (retval) {
             sw_zval_ptr_dtor(&retval);
         }
-        swTrace("on connect done (1)");
         sw_zval_ptr_dtor(&on_connect);
         sw_zval_ptr_dtor(&object);
-        swTrace("on connect done (2)");
         /* Should not do anything change */
-    } else {
-        swTrace("on connect callback is not exists.");
     }
 }
 
@@ -1056,11 +1059,9 @@ static int amc_connection_close(amc_connection_t *conn) {
     if (conn->fd > 0) {
         swConnection *swConn = swReactor_get(SwooleG.main_reactor, conn->fd);
         swConn->object = NULL;
-        swTrace("reactor delete");
         SwooleG.main_reactor->del(SwooleG.main_reactor, conn->fd);
     }
 
-    swTrace("closing connection");
     if (!conn->connected) {
         swoole_php_error(E_WARNING, "Swoole memcached is not connected to server.");
         goto error;
@@ -1073,7 +1074,6 @@ static int amc_connection_close(amc_connection_t *conn) {
         swoole_php_error(E_WARNING, "When close connection:%d, error:%s.", conn->fd, strerror(errno));
         goto error;
     }
-    swTrace("closing connection done");
 
     conn->connected = conn->active = conn->fd = 0;
     return AMC_OK;
@@ -1109,22 +1109,18 @@ static int amc_swoole_error_handle(swReactor *reactor, swEvent *event) {
 }
 
 static void amc_swoole_event_add_write(amc_connection_t *conn) {
-    swTrace("add write");
     swReactor_add_event(SwooleG.main_reactor, conn->fd, SW_EVENT_WRITE);
 }
 
 static void amc_swoole_event_add_read(amc_connection_t *conn) {
-    swTrace("add read");
     swReactor_add_event(SwooleG.main_reactor, conn->fd, SW_EVENT_READ);
 }
 
 static void amc_swoole_event_del_write(amc_connection_t *conn) {
-    swTrace("del write");
     swReactor_del_event(SwooleG.main_reactor, conn->fd, SW_EVENT_WRITE);
 }
 
 static void amc_swoole_event_del_read(amc_connection_t *conn) {
-    swTrace("del read");
     swReactor_del_event(SwooleG.main_reactor, conn->fd, SW_EVENT_READ);
 }
 
@@ -1144,6 +1140,9 @@ static PHP_METHOD(swoole_memcached, get);
 
 static PHP_METHOD(swoole_memcached, delete);
 
+static PHP_METHOD(swoole_memcached, decr);
+static PHP_METHOD(swoole_memcached, incr);
+
 
 static zend_class_entry swoole_memcached_ce;
 zend_class_entry *swoole_memcached_class_entry_ptr;
@@ -1159,6 +1158,8 @@ static const zend_function_entry swoole_memcached_methods[] = {
     PHP_ME(swoole_memcached, replace, NULL, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_memcached, get, NULL, ZEND_ACC_PUBLIC)
     PHP_ME(swoole_memcached, delete, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(swoole_memcached, decr, NULL, ZEND_ACC_PUBLIC)
+    PHP_ME(swoole_memcached, incr, NULL, ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -1201,8 +1202,6 @@ static PHP_METHOD(swoole_memcached, __construct) {
 
 static PHP_METHOD(swoole_memcached, __destruct) {
     zval *object = getThis();
-
-    swTrace("call __destruct");
 
     amc_connection_t *conn = swoole_get_object(object);
 
@@ -1247,11 +1246,11 @@ static PHP_METHOD(swoole_memcached, connect) {
     }
     AMC_SET_NONBLOCK(conn->fd);
 
+    php_swoole_check_reactor();
     swReactor *reactor = SwooleG.main_reactor;
 
     swConnection *swConn = swReactor_get(reactor, conn->fd);
     swConn->object = conn;
-    php_swoole_check_reactor();
     reactor->setHandle(reactor, PHP_SWOOLE_FD_MEMCACHED | SW_EVENT_READ, amc_swoole_read_handle);
     reactor->setHandle(reactor, PHP_SWOOLE_FD_MEMCACHED | SW_EVENT_WRITE, amc_swoole_write_handle);
     reactor->setHandle(reactor, PHP_SWOOLE_FD_MEMCACHED | SW_EVENT_ERROR, amc_swoole_error_handle);
@@ -1385,7 +1384,7 @@ static void memcached_store_command_process(amc_operation_type_t type, INTERNAL_
 
     size_t need_size = 7 + 1 + key_len + 11 * 3 + 3 + 3;
     amc_buffer_make_room(buffer, need_size);
-    int nwrite = snprintf(amc_buffer_tail_ptr(buffer), need_size, "%s key2 0 0 %d\r\n", amc_operation_names[type], value_len);
+    int nwrite = snprintf(amc_buffer_tail_ptr(buffer), need_size, "%s %s 0 %d %d\r\n", amc_operation_names[type], key, expire, value_len);
 
     if (nwrite > 0) {
         buffer->len += nwrite;
@@ -1461,4 +1460,52 @@ static PHP_METHOD(swoole_memcached, delete) {
     context->ev.addWrite(conn);
 
     RETURN_TRUE;
+}
+
+static void memcached_plusminus_command_process(amc_operation_type_t type, INTERNAL_FUNCTION_PARAMETERS) {
+    char *key;
+    zend_size_t key_len;
+    long step = 1;
+    zval *cb;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "slz", &key, &key_len, &step, &cb) == FAILURE) {
+        RETURN_FALSE;
+    }
+
+    if (key_len <= 0 || step <= 0) {
+        RETURN_FALSE;
+    }
+
+    amc_connection_t *conn = swoole_get_object(getThis());
+    amc_async_context_t *context = &conn->context;
+    amc_buffer_t *buffer = context->out_buffer;
+
+    size_t need_size = 6 + key_len + 15;
+    amc_buffer_make_room(buffer, need_size);
+    int nwrite = snprintf(amc_buffer_tail_ptr(buffer), need_size, "%s %s %d\r\n", amc_operation_names[type], key, step);
+
+    if (nwrite > 0) {
+        buffer->len += nwrite;
+    } else {
+        RETURN_FALSE;
+    }
+
+    amc_operation_t *operation = amc_operation_create(type, cb);
+    amc_list_append(context->operation_list, operation);
+
+    sw_zval_add_ref(&conn->object);
+
+    sw_zval_add_ref(&cb);
+
+    context->ev.addWrite(conn);
+
+    RETURN_TRUE;
+}
+
+static PHP_METHOD(swoole_memcached, incr) {
+    memcached_plusminus_command_process(OPERATION_INCR, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static PHP_METHOD(swoole_memcached, decr) {
+    memcached_plusminus_command_process(OPERATION_DECR, INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
