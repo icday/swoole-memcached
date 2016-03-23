@@ -55,7 +55,7 @@ $memcached = new swoole_memcached('127.0.0.1', 11211);
 $memcached->connect(function() use ($memcached) {
     echo "memcached is connected\n";
 
-    $memcached->add('key1', 'value1', function($err, $result) {
+    $memcached->add('key1', 'value1', 0, function($err, $result) {
         if ($err) {
             echo "error:" . $err;
             return;
@@ -63,7 +63,7 @@ $memcached->connect(function() use ($memcached) {
         if ($result) {
             echo "add key1 success\n";
         } else {
-            echo "add key1 failure. key1 is already exists.\n"
+            echo "add key1 failure. key1 is already exists.\n";
         }
     });
 
@@ -99,7 +99,7 @@ function testFunc() {
     $memcached->connect(function() use ($memcached) {
         echo "memcached is connected\n";
 
-        $memcached->add('key1', 'value1', function($err, $result) {
+        $memcached->add('key1', 'value1', 0, function($err, $result) {
             if ($err) {
                 echo "error:" . $err;
                 return;
@@ -107,7 +107,7 @@ function testFunc() {
             if ($result) {
                 echo "add key1 success\n";
             } else {
-                echo "add key1 failure. key1 is already exists.\n"
+                echo "add key1 failure. key1 is already exists.\n";
             }
 
             // connection will be closed after this function.
